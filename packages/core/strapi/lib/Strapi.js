@@ -14,8 +14,8 @@ const { createLogger } = require('@strapi/logger');
 const loadConfiguration = require('./core/app-configuration');
 
 const utils = require('./utils');
-const loadModules = require('./core/load-modules');
-const bootstrap = require('./core/bootstrap');
+const loadModules = require('./core/loaders/load-modules');
+const bootstrap = require('./core/loaders/bootstrap');
 const initializeMiddlewares = require('./middlewares');
 const initializeHooks = require('./hooks');
 const createStrapiFs = require('./core/fs');
@@ -28,6 +28,9 @@ const entityValidator = require('./services/entity-validator');
 const createTelemetry = require('./services/metrics');
 const createUpdateNotifier = require('./utils/update-notifier');
 const ee = require('./utils/ee');
+// const createPluginProvider = require('./core/plugins/plugin-provider');
+const createContainer = require('./core/container');
+const createConfigProvider = require('./core/base-providers/config-provider');
 
 const LIFECYCLES = {
   REGISTER: 'register',
@@ -58,7 +61,10 @@ class Strapi {
 
     this.admin = {};
     this.plugins = {};
-    this.config = loadConfiguration(this.dir, opts);
+
+    const appConfig = loadConfiguration(this.dir, opts); //
+    this.config = createConfigProvider(appConfig);
+    this.container = createContainer(this);
     this.app.proxy = this.config.get('server.proxy');
 
     // Logger.
@@ -114,7 +120,7 @@ class Strapi {
       [chalk.blue('Launched in'), Date.now() - this.config.launchedAt + ' ms'],
       [chalk.blue('Environment'), this.config.environment],
       [chalk.blue('Process PID'), process.pid],
-      [chalk.blue('Version'), `${this.config.info.strapi} (node ${process.version})`],
+      [chalk.blue('Version'), `${this.config.get('info.strapi')} (node ${process.version})`],
       [chalk.blue('Edition'), isEE ? 'Enterprise' : 'Community']
     );
 
@@ -296,6 +302,7 @@ class Strapi {
   }
 
   stopWithError(err, customMessage) {
+    console.log(err);
     this.log.debug(`⛔️ Server wasn't able to start properly.`);
     if (customMessage) {
       this.log.error(customMessage);
@@ -310,7 +317,7 @@ class Strapi {
       this.server.destroy();
     }
 
-    if (this.config.autoReload) {
+    if (this.config.get('autoReload')) {
       process.send('stop');
     }
 
@@ -328,12 +335,16 @@ class Strapi {
       }
     });
 
+    await this.container.load();
+
     const modules = await loadModules(this);
+
+    this.plugins = this.container.plugins.getAll();
 
     this.api = modules.api;
     this.admin = modules.admin;
     this.components = modules.components;
-    this.plugins = modules.plugins;
+
     this.middleware = modules.middlewares;
     this.hook = modules.hook;
 
@@ -379,6 +390,7 @@ class Strapi {
     await initializeHooks.call(this);
 
     await this.runLifecyclesFunctions(LIFECYCLES.BOOTSTRAP);
+
     await this.freeze();
 
     this.isLoaded = true;
@@ -430,6 +442,18 @@ class Strapi {
     return reload;
   }
 
+  async runBootstraps() {
+    for (const plugin of this.plugin.getAll()) {
+      await plugin.bootstrap(this);
+    }
+  }
+
+  async runRegisters() {
+    for (const plugin of this.plugin.getAll()) {
+      await plugin.register(this);
+    }
+  }
+
   async runLifecyclesFunctions(lifecycleName) {
     const execLifecycle = async fn => {
       if (!fn) {
@@ -442,20 +466,26 @@ class Strapi {
     const configPath = `functions.${lifecycleName}`;
 
     // plugins
-    await Promise.all(
-      Object.keys(this.plugins).map(plugin => {
-        const pluginFunc = _.get(this.plugins[plugin], `config.${configPath}`);
-
-        return execLifecycle(pluginFunc).catch(err => {
-          strapi.log.error(`${lifecycleName} function in plugin "${plugin}" failed`);
-          strapi.log.error(err);
-          strapi.stop();
-        });
-      })
-    );
+    if (lifecycleName === LIFECYCLES.BOOTSTRAP) {
+      await this.container.bootstrap();
+    } else if (lifecycleName === LIFECYCLES.REGISTER) {
+      await this.container.register();
+    }
+    //
+    // await Promise.all(
+    //   Object.keys(this.plugins).map(plugin => {
+    //     const pluginFunc = _.get(this.plugins[plugin], `config.${configPath}`);
+    //
+    //     return execLifecycle(pluginFunc).catch(err => {
+    //       strapi.log.error(`${lifecycleName} function in plugin "${plugin}" failed`);
+    //       strapi.log.error(err);
+    //       strapi.stop();
+    //     });
+    //   })
+    // );
 
     // user
-    await execLifecycle(_.get(this.config, configPath));
+    await execLifecycle(this.config.get(configPath));
 
     // admin
     const adminFunc = _.get(this.admin.config, configPath);

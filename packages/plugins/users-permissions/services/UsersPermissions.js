@@ -37,7 +37,7 @@ const isPermissionEnabled = (permission, role) =>
       (defaultPerm.roleType === null || role.type === defaultPerm.roleType)
   );
 
-module.exports = {
+module.exports = ({ strapi }) => ({
   async createRole(params) {
     if (!params.type) {
       params.type = _.snakeCase(_.deburr(_.toLower(params.name)));
@@ -413,4 +413,4 @@ module.exports = {
     const compiledObject = _.template(layout);
     return compiledObject(data);
   },
-};
+});
